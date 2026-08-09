@@ -19,7 +19,10 @@ use tokio::{
     sync::{broadcast, mpsc, oneshot, watch},
     time,
 };
-use tokio_tungstenite::{WebSocketStream, client_async, tungstenite::Message};
+use tokio_tungstenite::{
+    WebSocketStream, client_async_with_config,
+    tungstenite::{Message, protocol::WebSocketConfig},
+};
 
 pub mod mock;
 
@@ -31,6 +34,8 @@ pub struct TransportConfig {
     pub request_timeout: Duration,
     pub retry_initial: Duration,
     pub retry_max: Duration,
+    /// Maximum size of one trusted local app-server message or frame.
+    pub max_incoming_bytes: usize,
     pub client_name: String,
     pub client_version: String,
 }
@@ -48,6 +53,7 @@ impl Default for TransportConfig {
             request_timeout: Duration::from_secs(15),
             retry_initial: Duration::from_millis(100),
             retry_max: Duration::from_secs(5),
+            max_incoming_bytes: 256 << 20,
             client_name: "codex-control".into(),
             client_version: env!("CARGO_PKG_VERSION").into(),
         }
@@ -273,7 +279,15 @@ async fn connect(config: &TransportConfig) -> Result<WebSocketStream<UnixStream>
     .map_err(|error| format!("unix socket connect: {error}"))?;
     let (socket, response) = time::timeout(
         config.connect_timeout,
-        client_async("ws://localhost/rpc", stream),
+        client_async_with_config(
+            "ws://localhost/rpc",
+            stream,
+            Some(
+                WebSocketConfig::default()
+                    .max_message_size(Some(config.max_incoming_bytes))
+                    .max_frame_size(Some(config.max_incoming_bytes)),
+            ),
+        ),
     )
     .await
     .map_err(|_| "websocket handshake timed out".to_owned())?
@@ -663,6 +677,46 @@ mod tests {
         assert!(event.frame.is_server_request());
         time::sleep(Duration::from_millis(30)).await;
         assert_eq!(server.responses_to_server_requests().await, 0);
+        client.shutdown().await;
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn receives_a_legitimate_frame_larger_than_tungstenites_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rpc.sock");
+        let server = MockAppServer::start(path.clone()).await.unwrap();
+        let client = TransportHandle::spawn(TransportConfig {
+            read_idle_timeout: Duration::from_secs(30),
+            ..config(path)
+        });
+        let mut inbound = client.subscribe();
+        client
+            .request("thread/list", serde_json::json!({}))
+            .await
+            .unwrap();
+
+        let text = "x".repeat((17 << 20) + 1);
+        server
+            .emit_notification("large/local-frame", serde_json::json!({"text": text}))
+            .await;
+        let event = time::timeout(Duration::from_secs(30), async {
+            loop {
+                let event = inbound.recv().await.unwrap();
+                if event.method() == Some("large/local-frame") {
+                    break event;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            event.frame.params().unwrap()["text"]
+                .as_str()
+                .unwrap()
+                .len(),
+            (17 << 20) + 1
+        );
         client.shutdown().await;
         server.shutdown().await;
     }
