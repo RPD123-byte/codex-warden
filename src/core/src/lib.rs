@@ -38,7 +38,7 @@ pub use transport::{ConnectionPhase, RequestError};
 pub struct Config {
     /// Launch/repair the macOS GUI and shared daemon. Defaults to `true`.
     pub manage_gui: bool,
-    /// Unix socket, bounded timeouts/reconnects, and a 256 MiB trusted-local frame limit.
+    /// Unix socket, bounded timeouts/reconnects, and a 32 MiB trusted-local frame limit.
     pub transport: TransportConfig,
     /// Ten-minute, 8 MiB/thread, 64 MiB/global retention defaults.
     pub store: StoreConfig,

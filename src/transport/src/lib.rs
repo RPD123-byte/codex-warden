@@ -53,7 +53,7 @@ impl Default for TransportConfig {
             request_timeout: Duration::from_secs(15),
             retry_initial: Duration::from_millis(100),
             retry_max: Duration::from_secs(5),
-            max_incoming_bytes: 256 << 20,
+            max_incoming_bytes: 32 << 20,
             client_name: "codex-control".into(),
             client_version: env!("CARGO_PKG_VERSION").into(),
         }
