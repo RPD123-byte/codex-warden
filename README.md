@@ -104,7 +104,7 @@ Once this repository is available to Cargo, depend on the `codex-control` packag
 
 ```toml
 [dependencies]
-codex-control = { git = "https://github.com/RPD123-byte/CodexWarden", package = "codex-control" }
+codex-control = { git = "https://github.com/RPD123-byte/Warden", package = "codex-control" }
 serde_json = "1"
 ```
 
