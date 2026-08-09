@@ -26,6 +26,7 @@ pub enum Fault {
 #[derive(Clone, Debug)]
 pub struct MockThread {
     pub id: String,
+    pub cwd: PathBuf,
     pub status: String,
     pub turn_id: Option<String>,
     pub ephemeral: bool,
@@ -38,7 +39,7 @@ impl MockThread {
             Some(id) => serde_json::json!([{"id": id, "status": self.status}]),
             None => serde_json::json!([]),
         };
-        serde_json::json!({"id":self.id,"status":{"type":self.status},"turns":turns,
+        serde_json::json!({"id":self.id,"cwd":self.cwd,"status":{"type":self.status},"turns":turns,
             "ephemeral":self.ephemeral,"updatedAt":self.updated_at})
     }
 }
@@ -262,6 +263,7 @@ async fn handle_request(state: &Arc<Mutex<State>>, value: &Value) -> Option<Valu
                 .cloned()
                 .unwrap_or(MockThread {
                     id: thread_id.into(),
+                    cwd: PathBuf::from("/mock/project"),
                     status: "idle".into(),
                     turn_id: None,
                     ephemeral: false,

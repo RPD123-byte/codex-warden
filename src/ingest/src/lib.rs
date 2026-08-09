@@ -493,6 +493,7 @@ fn is_ephemeral_error(error: &Value) -> bool {
 mod tests {
     use super::*;
     use protocol::IncomingFrame;
+    use std::path::PathBuf;
     use transport::{
         TransportConfig, TransportHandle,
         mock::{MockAppServer, MockThread},
@@ -538,6 +539,7 @@ mod tests {
         server
             .add_thread(MockThread {
                 id: "a".into(),
+                cwd: PathBuf::from("/mock/a"),
                 status: "active".into(),
                 turn_id: Some("x".into()),
                 ephemeral: false,
@@ -547,6 +549,7 @@ mod tests {
         server
             .add_thread(MockThread {
                 id: "b".into(),
+                cwd: PathBuf::from("/mock/b"),
                 status: "active".into(),
                 turn_id: Some("y".into()),
                 ephemeral: false,
@@ -597,6 +600,7 @@ mod tests {
         server
             .add_thread(MockThread {
                 id: "a".into(),
+                cwd: PathBuf::from("/mock/a"),
                 status: "active".into(),
                 turn_id: Some("t1".into()),
                 ephemeral: false,
@@ -645,6 +649,7 @@ mod tests {
         server
             .add_thread(MockThread {
                 id: "a".into(),
+                cwd: PathBuf::from("/mock/a"),
                 status: "active".into(),
                 turn_id: Some("t1".into()),
                 ephemeral: false,

@@ -1,6 +1,7 @@
 //! Embedded Codex control library.
 
 mod skills;
+mod threads;
 
 use control::{ControlConfig, Controller};
 use ingest::{AuthoritativeIngress, IngestConfig, IngestError, SubscriptionState, ThreadIngestor};
@@ -28,6 +29,7 @@ pub use skills::{
     SkillLoadError, SkillManagementError, SkillMetadata, SkillsListEntry, SkillsListResponse,
 };
 pub use streaming::LifecycleItem;
+pub use threads::{ListedThread, ThreadListError};
 pub use transport::{ConnectionPhase, RequestError};
 
 /// Complete runtime configuration. Defaults are deliberately bounded and conservative.
@@ -92,6 +94,7 @@ pub struct Handle {
     ingestor: ThreadIngestor<TransportHandle>,
     controller: Controller<TransportHandle>,
     skills: skills::SkillController<TransportHandle>,
+    threads: threads::ThreadController<TransportHandle>,
     shutdown_tx: watch::Sender<bool>,
     stopped: Arc<AtomicBool>,
     supervision: Option<SupervisionState>,
@@ -194,6 +197,12 @@ impl Handle {
             .await
     }
 
+    /// Lists every non-archived interactive thread reported by the app-server, including idle
+    /// threads that are intentionally absent from the reducer snapshot.
+    pub async fn list_threads(&self) -> Result<Vec<ListedThread>, ThreadListError> {
+        self.threads.list_all().await
+    }
+
     pub async fn shutdown(&self) {
         if self.stopped.swap(true, Ordering::AcqRel) {
             return;
@@ -258,6 +267,7 @@ impl CodexControl {
         let controller =
             Controller::new(transport.clone(), reducer.clone(), config.control.clone());
         let skills = skills::SkillController::new(transport.clone());
+        let threads = threads::ThreadController::new(transport.clone());
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let mut ingress_shutdown = shutdown_rx.clone();
@@ -351,6 +361,7 @@ impl CodexControl {
             ingestor,
             controller,
             skills,
+            threads,
             shutdown_tx,
             stopped: Arc::new(AtomicBool::new(false)),
             supervision,
@@ -384,6 +395,7 @@ mod tests {
         server
             .add_thread(MockThread {
                 id: "active".into(),
+                cwd: PathBuf::from("/mock/active"),
                 status: "active".into(),
                 turn_id: Some("turn".into()),
                 ephemeral: false,
@@ -427,6 +439,53 @@ mod tests {
         assert_eq!(result, 42);
         server.shutdown().await;
         let _ = IncomingFrame::parse(serde_json::json!({"id":1,"result":{}}));
+    }
+
+    #[tokio::test]
+    async fn typed_thread_list_includes_idle_threads_absent_from_the_reducer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rpc.sock");
+        let idle_cwd = dir.path().join("idle-project");
+        let server = MockAppServer::start(path.clone()).await.unwrap();
+        server
+            .add_thread(MockThread {
+                id: "idle".into(),
+                cwd: idle_cwd.clone(),
+                status: "idle".into(),
+                turn_id: None,
+                ephemeral: false,
+                updated_at: 1,
+            })
+            .await;
+        let config = Config {
+            manage_gui: false,
+            transport: TransportConfig {
+                socket_path: path,
+                connect_timeout: Duration::from_millis(300),
+                request_timeout: Duration::from_secs(1),
+                retry_initial: Duration::from_millis(20),
+                retry_max: Duration::from_millis(50),
+                ..TransportConfig::default()
+            },
+            ..Config::default()
+        };
+        let server_for_run = server.clone();
+
+        CodexControl::run(config, move |handle| async move {
+            assert!(!handle.snapshot().await.threads.contains_key("idle"));
+            let threads = handle.list_threads().await.unwrap();
+            assert_eq!(threads.len(), 1);
+            assert_eq!(threads[0].id, "idle");
+            assert_eq!(threads[0].cwd, idle_cwd);
+            assert!(server_for_run.received().await.iter().any(|request| {
+                request["method"] == "thread/list"
+                    && request["params"]["sortKey"] == "updated_at"
+                    && request["params"]["limit"] == 100
+            }));
+        })
+        .await
+        .unwrap();
+        server.shutdown().await;
     }
 
     #[tokio::test]
