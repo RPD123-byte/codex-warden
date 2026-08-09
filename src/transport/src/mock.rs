@@ -52,6 +52,7 @@ struct State {
     next_server_id: u64,
     resume_failures_remaining: usize,
     request_failures_remaining: HashMap<String, usize>,
+    hooks_response: Option<Value>,
 }
 
 #[derive(Clone)]
@@ -76,6 +77,7 @@ impl MockAppServer {
             next_server_id: 9000,
             resume_failures_remaining: 0,
             request_failures_remaining: HashMap::new(),
+            hooks_response: None,
         }));
         let (outgoing, _) = broadcast::channel(128);
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
@@ -121,6 +123,9 @@ impl MockAppServer {
             .await
             .request_failures_remaining
             .insert(method.into(), count);
+    }
+    pub async fn set_hooks_response(&self, response: Value) {
+        self.state.lock().await.hooks_response = Some(response);
     }
     pub async fn emit_notification(&self, method: &str, params: Value) {
         let _ = self
@@ -285,6 +290,13 @@ async fn handle_request(state: &Arc<Mutex<State>>, value: &Value) -> Option<Valu
                 .unwrap_or_else(|| Value::String("/mock/project".into()));
             serde_json::json!({"data":[{"cwd":cwd,"skills":[],"errors":[]}]})
         }
+        "hooks/list" => state
+            .lock()
+            .await
+            .hooks_response
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({"data": []})),
+        "config/batchWrite" => serde_json::json!({}),
         "turn/interrupt" => serde_json::json!({}),
         "turn/start" => serde_json::json!({"turn":{"id":"mock-turn"}}),
         "turn/steer" => serde_json::json!({"turnId":params["expectedTurnId"]}),
