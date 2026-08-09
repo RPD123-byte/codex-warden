@@ -4,7 +4,7 @@ mod skills;
 mod threads;
 
 use control::{ControlConfig, Controller};
-use ingest::{AuthoritativeIngress, IngestConfig, IngestError, SubscriptionState, ThreadIngestor};
+use ingest::{AuthoritativeIngress, IngestConfig, IngestError, ThreadIngestor};
 use reducer::{Reducer, Snapshot};
 use std::{
     collections::HashMap,
@@ -23,7 +23,7 @@ use tokio::sync::watch;
 use transport::{Health, TransportConfig, TransportHandle};
 
 pub use control::{ActionOutcome, ActionTarget, Evidence};
-pub use ingest::DiscoveryOutcome;
+pub use ingest::{DiscoveryOutcome, SubscriptionState};
 pub use protocol::{IncomingFrame, Plane, Sequence, SequencedEvent};
 pub use reducer::ReplayResult;
 pub use skills::{
