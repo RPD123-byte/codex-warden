@@ -1,5 +1,6 @@
 //! Embedded Codex control library.
 
+mod hooks;
 mod skills;
 mod threads;
 
@@ -9,6 +10,7 @@ use reducer::{Reducer, Snapshot};
 use std::{
     collections::HashMap,
     future::Future,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -23,6 +25,9 @@ use tokio::sync::watch;
 use transport::{Health, TransportConfig, TransportHandle};
 
 pub use control::{ActionOutcome, ActionTarget, Evidence};
+pub use hooks::{
+    HookManagementError, HookMetadata, HookTrustUpdate, HooksListEntry, HooksListResponse,
+};
 pub use ingest::{DiscoveryOutcome, SubscriptionState};
 pub use protocol::{IncomingFrame, Plane, Sequence, SequencedEvent};
 pub use reducer::ReplayResult;
@@ -94,6 +99,7 @@ pub struct Handle {
     store: EventStore,
     ingestor: ThreadIngestor<TransportHandle>,
     controller: Controller<TransportHandle>,
+    hooks: hooks::HookController<TransportHandle>,
     skills: skills::SkillController<TransportHandle>,
     threads: threads::ThreadController<TransportHandle>,
     shutdown_tx: watch::Sender<bool>,
@@ -165,6 +171,25 @@ impl Handle {
         input: Vec<serde_json::Value>,
     ) -> ActionOutcome {
         self.controller.start(thread_id, input).await
+    }
+
+    /// Lists the hook definitions currently discovered for the requested working directories.
+    pub async fn list_hooks<I, P>(&self, cwds: I) -> Result<HooksListResponse, HookManagementError>
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        self.hooks
+            .list(cwds.into_iter().map(Into::into).collect())
+            .await
+    }
+
+    /// Records explicit trust for exact hook hashes through Codex's typed config API.
+    pub async fn trust_hooks<I>(&self, updates: I) -> Result<(), HookManagementError>
+    where
+        I: IntoIterator<Item = HookTrustUpdate>,
+    {
+        self.hooks.trust(updates.into_iter().collect()).await
     }
 
     /// Replaces the app-server's complete set of extra skill roots.
@@ -287,6 +312,7 @@ impl CodexControl {
                 .with_store(store.clone());
         let controller =
             Controller::new(transport.clone(), reducer.clone(), config.control.clone());
+        let hooks = hooks::HookController::new(transport.clone());
         let skills = skills::SkillController::new(transport.clone());
         let threads = threads::ThreadController::new(transport.clone());
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -381,6 +407,7 @@ impl CodexControl {
             store,
             ingestor,
             controller,
+            hooks,
             skills,
             threads,
             shutdown_tx,
