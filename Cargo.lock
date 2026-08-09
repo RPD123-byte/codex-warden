@@ -66,6 +66,7 @@ name = "codex-control"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "control",
  "futures-util",
  "ingest",

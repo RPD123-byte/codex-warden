@@ -1,5 +1,7 @@
 //! Embedded Codex control library.
 
+mod skills;
+
 use control::{ControlConfig, Controller};
 use ingest::{AuthoritativeIngress, IngestConfig, IngestError, SubscriptionState, ThreadIngestor};
 use reducer::{Reducer, Snapshot};
@@ -19,8 +21,11 @@ use tokio::sync::watch;
 use transport::{Health, TransportConfig, TransportHandle};
 
 pub use control::{ActionOutcome, ActionTarget, Evidence};
-pub use protocol::{Plane, Sequence, SequencedEvent};
+pub use protocol::{IncomingFrame, Plane, Sequence, SequencedEvent};
 pub use reducer::ReplayResult;
+pub use skills::{
+    SkillLoadError, SkillManagementError, SkillMetadata, SkillsListEntry, SkillsListResponse,
+};
 pub use streaming::LifecycleItem;
 pub use transport::{ConnectionPhase, RequestError};
 
@@ -85,6 +90,7 @@ pub struct Handle {
     store: EventStore,
     ingestor: ThreadIngestor<TransportHandle>,
     controller: Controller<TransportHandle>,
+    skills: skills::SkillController<TransportHandle>,
     shutdown_tx: watch::Sender<bool>,
     stopped: Arc<AtomicBool>,
     supervision: Option<SupervisionState>,
@@ -156,6 +162,37 @@ impl Handle {
         self.controller.start(thread_id, input).await
     }
 
+    /// Replaces the app-server's complete set of extra skill roots.
+    ///
+    /// Roots must be absolute, lexically normalized paths. The last successfully applied set is
+    /// automatically restored whenever the shared app-server connection is re-established.
+    pub async fn set_skill_extra_roots<I, P>(
+        &self,
+        extra_roots: I,
+    ) -> Result<(), SkillManagementError>
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<std::path::PathBuf>,
+    {
+        self.skills
+            .set_extra_roots(extra_roots.into_iter().map(Into::into).collect())
+            .await
+    }
+
+    /// Forces the app-server to bypass its skill cache and returns typed discovery results.
+    pub async fn force_refresh_skills<I, P>(
+        &self,
+        cwds: I,
+    ) -> Result<SkillsListResponse, SkillManagementError>
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<std::path::PathBuf>,
+    {
+        self.skills
+            .force_refresh(cwds.into_iter().map(Into::into).collect())
+            .await
+    }
+
     pub async fn shutdown(&self) {
         if self.stopped.swap(true, Ordering::AcqRel) {
             return;
@@ -219,6 +256,7 @@ impl CodexControl {
                 .with_store(store.clone());
         let controller =
             Controller::new(transport.clone(), reducer.clone(), config.control.clone());
+        let skills = skills::SkillController::new(transport.clone());
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let mut ingress_shutdown = shutdown_rx.clone();
@@ -251,6 +289,7 @@ impl CodexControl {
         // traffic until discovery/reconciliation has run against that new connection.
         let mut reconnect_health = transport.health();
         let reconnect_ingestor = ingestor.clone();
+        let reconnect_skills = skills.clone();
         let reconnect_transport = transport.clone();
         let mut reconnect_shutdown = shutdown_rx.clone();
         tokio::spawn(async move {
@@ -263,7 +302,10 @@ impl CodexControl {
                             && !reconnect_transport.is_reconciled()
                         {
                             match reconnect_ingestor.reconcile().await {
-                                Ok(_) => { let _ = reconnect_transport.mark_reconciled().await; }
+                                Ok(_) => match reconnect_skills.reapply_extra_roots().await {
+                                    Ok(_) => { let _ = reconnect_transport.mark_reconciled().await; }
+                                    Err(error) => tracing::error!(%error, "post-reconnect skill-root restoration failed; action gate remains closed"),
+                                }
                                 Err(error) => tracing::error!(%error, "post-reconnect reconciliation failed; action gate remains closed"),
                             }
                         }
@@ -285,6 +327,7 @@ impl CodexControl {
             store,
             ingestor,
             controller,
+            skills,
             shutdown_tx,
             stopped: Arc::new(AtomicBool::new(false)),
             supervision,
@@ -307,8 +350,7 @@ pub fn init_tracing(default_filter: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::IncomingFrame;
-    use std::time::Duration;
+    use std::{path::PathBuf, time::Duration};
     use transport::mock::{Fault, MockAppServer, MockThread};
 
     #[tokio::test]
@@ -390,6 +432,96 @@ mod tests {
                 handle.steer("t", "turn", vec![]).await,
                 ActionOutcome::OutcomeUnknown { .. }
             ));
+        })
+        .await
+        .unwrap();
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn skill_roots_and_forced_refresh_follow_the_mock_contract_and_survive_reconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rpc.sock");
+        let skill_root = dir.path().join("generated-skills");
+        let project = dir.path().join("project");
+        let server = MockAppServer::start(path.clone()).await.unwrap();
+        let config = Config {
+            manage_gui: false,
+            transport: TransportConfig {
+                socket_path: path,
+                connect_timeout: Duration::from_millis(300),
+                request_timeout: Duration::from_secs(1),
+                retry_initial: Duration::from_millis(20),
+                retry_max: Duration::from_millis(50),
+                ..TransportConfig::default()
+            },
+            ..Config::default()
+        };
+        let server_for_run = server.clone();
+        CodexControl::run(config, move |handle| async move {
+            handle
+                .set_skill_extra_roots([skill_root.clone()])
+                .await
+                .unwrap();
+            let listed = handle
+                .force_refresh_skills([project.clone()])
+                .await
+                .unwrap();
+            assert_eq!(listed.data.len(), 1);
+            assert_eq!(listed.data[0].cwd, project);
+
+            let received = server_for_run.received().await;
+            assert!(received.iter().any(|request| {
+                request["method"] == "skills/extraRoots/set"
+                    && request["params"] == serde_json::json!({"extraRoots":[skill_root.clone()]})
+            }));
+            assert!(received.iter().any(|request| {
+                request["method"] == "skills/list"
+                    && request["params"]
+                        == serde_json::json!({"cwds":[project.clone()],"forceReload":true})
+            }));
+
+            // Force the current connection closed through a read-only skill request. Once the
+            // transport reconnects, CodexControl must replay its remembered root set before it
+            // marks the connection reconciled again.
+            server_for_run
+                .set_fault(Fault::DisconnectOnMethod("skills/list".into()))
+                .await;
+            assert!(matches!(
+                handle.force_refresh_skills(Vec::<PathBuf>::new()).await,
+                Err(SkillManagementError::Request(
+                    RequestError::WrittenOutcomeUnknown { .. }
+                ))
+            ));
+            server_for_run.set_fault(Fault::None).await;
+
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let received = server_for_run.received().await;
+                    let root_sets = received
+                        .iter()
+                        .filter(|request| request["method"] == "skills/extraRoots/set")
+                        .count();
+                    if root_sets >= 2
+                        && handle.health().borrow().phase == ConnectionPhase::Connected
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("skill roots were not reapplied after reconnect");
+
+            let received = server_for_run.received().await;
+            let root_sets: Vec<_> = received
+                .iter()
+                .filter(|request| request["method"] == "skills/extraRoots/set")
+                .collect();
+            assert_eq!(root_sets.len(), 2);
+            assert!(root_sets.iter().all(|request| {
+                request["params"] == serde_json::json!({"extraRoots":[skill_root.clone()]})
+            }));
         })
         .await
         .unwrap();

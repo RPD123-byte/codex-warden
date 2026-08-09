@@ -248,6 +248,16 @@ async fn handle_request(state: &Arc<Mutex<State>>, value: &Value) -> Option<Valu
             serde_json::json!({"subscriptionId":format!("sub-{}", params["threadId"].as_str().unwrap_or_default())})
         }
         "thread/unsubscribe" => serde_json::json!({"status":"unsubscribed"}),
+        "skills/extraRoots/set" => serde_json::json!({}),
+        "skills/list" => {
+            let cwd = params
+                .get("cwds")
+                .and_then(Value::as_array)
+                .and_then(|cwds| cwds.first())
+                .cloned()
+                .unwrap_or_else(|| Value::String("/mock/project".into()));
+            serde_json::json!({"data":[{"cwd":cwd,"skills":[],"errors":[]}]})
+        }
         "turn/interrupt" => serde_json::json!({}),
         "turn/start" => serde_json::json!({"turn":{"id":"mock-turn"}}),
         "turn/steer" => serde_json::json!({"turnId":params["expectedTurnId"]}),
