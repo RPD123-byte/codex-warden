@@ -23,6 +23,7 @@ use tokio::sync::watch;
 use transport::{Health, TransportConfig, TransportHandle};
 
 pub use control::{ActionOutcome, ActionTarget, Evidence};
+pub use ingest::DiscoveryOutcome;
 pub use protocol::{IncomingFrame, Plane, Sequence, SequencedEvent};
 pub use reducer::ReplayResult;
 pub use skills::{
@@ -211,6 +212,16 @@ impl Handle {
         thread_id: impl AsRef<str>,
     ) -> Result<ReadThread, ThreadReadError> {
         self.threads.read(thread_id.as_ref()).await
+    }
+
+    /// Ensures this observer receives subscription-scoped lifecycle items for a thread.
+    ///
+    /// Consumers that need item-level events for idle tasks should call this for authoritative
+    /// `thread/list` results during startup instead of waiting for an activation-status signal.
+    pub async fn observe_thread(&self, thread_id: impl AsRef<str>) -> DiscoveryOutcome {
+        self.ingestor
+            .discover(thread_id.as_ref(), ingest::DiscoverySource::Reconciliation)
+            .await
     }
 
     pub async fn shutdown(&self) {
@@ -487,6 +498,14 @@ mod tests {
             assert_eq!(threads.len(), 1);
             assert_eq!(threads[0].id, "idle");
             assert_eq!(threads[0].cwd, idle_cwd);
+            assert_eq!(
+                handle.observe_thread("idle").await,
+                DiscoveryOutcome::Subscribed
+            );
+            assert_eq!(
+                handle.subscription_states().await.get("idle"),
+                Some(&SubscriptionState::Subscribed)
+            );
             assert!(server_for_run.received().await.iter().any(|request| {
                 request["method"] == "thread/list"
                     && request["params"]["sortKey"] == "updated_at"
