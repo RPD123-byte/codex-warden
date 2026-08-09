@@ -30,6 +30,7 @@ pub struct HookMetadata {
     pub enabled: bool,
     pub current_hash: String,
     pub trust_status: String,
+    #[serde(default)]
     pub execution_mode: String,
 }
 
@@ -228,6 +229,25 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn execution_mode_is_optional_for_older_installed_app_servers() {
+        let response: HooksListResponse = serde_json::from_value(json!({"data": [{
+            "cwd": "/tmp/project",
+            "hooks": [{
+                "key": "hook-key",
+                "eventName": "UserPromptSubmit",
+                "command": "python3 bridge.py",
+                "sourcePath": "/tmp/hooks.json",
+                "enabled": true,
+                "currentHash": "sha256:abc",
+                "trustStatus": "untrusted"
+            }]
+        }]}))
+        .unwrap();
+
+        assert!(response.data[0].hooks[0].execution_mode.is_empty());
     }
 
     #[tokio::test]
