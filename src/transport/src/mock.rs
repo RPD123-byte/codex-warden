@@ -50,6 +50,7 @@ struct State {
     responses_to_server_requests: usize,
     next_server_id: u64,
     resume_failures_remaining: usize,
+    request_failures_remaining: HashMap<String, usize>,
 }
 
 #[derive(Clone)]
@@ -73,6 +74,7 @@ impl MockAppServer {
             responses_to_server_requests: 0,
             next_server_id: 9000,
             resume_failures_remaining: 0,
+            request_failures_remaining: HashMap::new(),
         }));
         let (outgoing, _) = broadcast::channel(128);
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
@@ -111,6 +113,13 @@ impl MockAppServer {
     }
     pub async fn set_resume_failures(&self, count: usize) {
         self.state.lock().await.resume_failures_remaining = count;
+    }
+    pub async fn set_request_failures(&self, method: impl Into<String>, count: usize) {
+        self.state
+            .lock()
+            .await
+            .request_failures_remaining
+            .insert(method.into(), count);
     }
     pub async fn emit_notification(&self, method: &str, params: Value) {
         let _ = self
@@ -171,14 +180,30 @@ async fn serve_connection(
                 let value: Value = match message { Message::Text(text) => serde_json::from_str(&text).map_err(|e| e.to_string())?,
                     Message::Binary(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string())?,
                     Message::Close(_) => return Ok(()), _ => continue };
-                let interrupt_before_response = {
+                let (interrupt_before_response, error_before_response) = {
                     let mut locked = state.lock().await;
                     if value.get("method").is_none() && value.get("id").is_some() { locked.responses_to_server_requests += 1; }
                     locked.received.push(value.clone());
                     if matches!(&locked.fault, Fault::DisconnectOnMethod(target) if value["method"] == *target) { return Ok(()); }
-                    matches!(locked.fault, Fault::InterruptCompletionBeforeResponse)
-                        && value["method"] == "turn/interrupt"
+                    let error_before_response = value["method"].as_str().is_some_and(|method| {
+                        locked.request_failures_remaining.get_mut(method).is_some_and(|remaining| {
+                            if *remaining == 0 { return false; }
+                            *remaining -= 1;
+                            true
+                        })
+                    });
+                    (
+                        matches!(locked.fault, Fault::InterruptCompletionBeforeResponse)
+                            && value["method"] == "turn/interrupt",
+                        error_before_response,
+                    )
                 };
+                if error_before_response {
+                    let response = serde_json::json!({"jsonrpc":"2.0","id":value["id"],
+                        "error":{"code":-32001,"message":"transient mock failure"}});
+                    socket.send(Message::Text(response.to_string().into())).await.map_err(|e| e.to_string())?;
+                    continue;
+                }
                 if interrupt_before_response {
                     let params = value.get("params").cloned().unwrap_or(Value::Null);
                     let event = serde_json::json!({"jsonrpc":"2.0","method":"turn/completed","params":{

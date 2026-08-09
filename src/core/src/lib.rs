@@ -12,6 +12,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 use store::{EventStore, QueryResult, StoreConfig};
 use streaming::{DeltaStream, EventHub, LifecycleStream};
@@ -301,12 +302,34 @@ impl CodexControl {
                         if reconnect_health.borrow().phase == ConnectionPhase::Reconciling
                             && !reconnect_transport.is_reconciled()
                         {
-                            match reconnect_ingestor.reconcile().await {
-                                Ok(_) => match reconnect_skills.reapply_extra_roots().await {
-                                    Ok(_) => { let _ = reconnect_transport.mark_reconciled().await; }
-                                    Err(error) => tracing::error!(%error, "post-reconnect skill-root restoration failed; action gate remains closed"),
+                            let mut retry = Duration::from_millis(50);
+                            while reconnect_health.borrow().phase == ConnectionPhase::Reconciling
+                                && !reconnect_transport.is_reconciled()
+                            {
+                                let restored = match reconnect_ingestor.reconcile().await {
+                                    Ok(_) => match reconnect_skills.reapply_extra_roots().await {
+                                        Ok(_) => true,
+                                        Err(error) => {
+                                            tracing::error!(%error, "post-reconnect skill-root restoration failed; retrying before opening action gate");
+                                            false
+                                        }
+                                    },
+                                    Err(error) => {
+                                        tracing::error!(%error, "post-reconnect reconciliation failed; retrying before opening action gate");
+                                        false
+                                    }
+                                };
+                                if restored {
+                                    let _ = reconnect_transport.mark_reconciled().await;
+                                    break;
                                 }
-                                Err(error) => tracing::error!(%error, "post-reconnect reconciliation failed; action gate remains closed"),
+                                tokio::select! {
+                                    changed = reconnect_shutdown.changed() => {
+                                        if changed.is_err() || *reconnect_shutdown.borrow() { return; }
+                                    }
+                                    () = tokio::time::sleep(retry) => {}
+                                }
+                                retry = (retry * 2).min(Duration::from_secs(2));
                             }
                         }
                     }
@@ -485,6 +508,9 @@ mod tests {
             // transport reconnects, CodexControl must replay its remembered root set before it
             // marks the connection reconciled again.
             server_for_run
+                .set_request_failures("skills/extraRoots/set", 1)
+                .await;
+            server_for_run
                 .set_fault(Fault::DisconnectOnMethod("skills/list".into()))
                 .await;
             assert!(matches!(
@@ -502,7 +528,7 @@ mod tests {
                         .iter()
                         .filter(|request| request["method"] == "skills/extraRoots/set")
                         .count();
-                    if root_sets >= 2
+                    if root_sets >= 3
                         && handle.health().borrow().phase == ConnectionPhase::Connected
                     {
                         break;
@@ -518,7 +544,7 @@ mod tests {
                 .iter()
                 .filter(|request| request["method"] == "skills/extraRoots/set")
                 .collect();
-            assert_eq!(root_sets.len(), 2);
+            assert_eq!(root_sets.len(), 3);
             assert!(root_sets.iter().all(|request| {
                 request["params"] == serde_json::json!({"extraRoots":[skill_root.clone()]})
             }));
