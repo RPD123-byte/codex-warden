@@ -224,14 +224,20 @@ impl Supervisor {
             .ok_or_else(|| "ChatGPT application path is not valid UTF-8".to_string())?;
         // Launch Services owns the GUI process. A terminal or process manager can then
         // tear down the embedding process tree without treating ChatGPT as its child.
+        // `open` does not forward its own environment to the launched application, so the
+        // variables must be supplied through its explicit `--env` launch options.
         self.ops
             .spawn(
                 Path::new("/usr/bin/open"),
-                &["-a", application],
                 &[
-                    ("CODEX_APP_SERVER_USE_LOCAL_DAEMON", "1"),
-                    ("CODEX_APP_SERVER_FORCE_CLI", "0"),
+                    "--env",
+                    "CODEX_APP_SERVER_USE_LOCAL_DAEMON=1",
+                    "--env",
+                    "CODEX_APP_SERVER_FORCE_CLI=0",
+                    "-a",
+                    application,
                 ],
+                &[],
             )
             .await
     }
@@ -500,6 +506,8 @@ mod tests {
         stubborn: bool,
         compatible: bool,
         spawns: Vec<String>,
+        spawn_args: Vec<Vec<String>>,
+        spawn_env: Vec<Vec<(String, String)>>,
         quit_requests: usize,
     }
     #[derive(Default)]
@@ -559,16 +567,27 @@ mod tests {
         async fn spawn(
             &self,
             program: &Path,
-            _args: &[&str],
+            args: &[&str],
             env: &[(&str, &str)],
         ) -> Result<(), String> {
             let mut state = self.state.lock().await;
             state.spawns.push(program.display().to_string());
+            state
+                .spawn_args
+                .push(args.iter().map(|value| (*value).to_string()).collect());
+            state.spawn_env.push(
+                env.iter()
+                    .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                    .collect(),
+            );
             if program == Path::new("/usr/bin/open")
                 || program.to_string_lossy().contains("ChatGPT")
             {
                 state.gui = true;
-                state.attached = env.contains(&("CODEX_APP_SERVER_USE_LOCAL_DAEMON", "1"));
+                state.attached = env.contains(&("CODEX_APP_SERVER_USE_LOCAL_DAEMON", "1"))
+                    || args
+                        .windows(2)
+                        .any(|pair| pair == ["--env", "CODEX_APP_SERVER_USE_LOCAL_DAEMON=1"]);
             } else {
                 state.daemon = true;
             }
@@ -691,6 +710,21 @@ mod tests {
 
         assert_eq!(process_state.quit_requests, 1);
         assert_eq!(process_state.spawns, vec!["/usr/bin/open"]);
+        assert_eq!(
+            process_state.spawn_args,
+            vec![vec![
+                "--env",
+                "CODEX_APP_SERVER_USE_LOCAL_DAEMON=1",
+                "--env",
+                "CODEX_APP_SERVER_FORCE_CLI=0",
+                "-a",
+                "/mock/ChatGPT",
+            ]]
+        );
+        assert_eq!(
+            process_state.spawn_env,
+            vec![Vec::<(String, String)>::new()]
+        );
         assert!(process_state.gui);
         assert!(process_state.attached);
         assert!(state.daemon_left_running);
