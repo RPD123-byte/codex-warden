@@ -211,7 +211,8 @@ impl<C: RpcClient> ThreadIngestor<C> {
                     );
                 }
                 Err(RequestError::Rejected { error, .. })
-                    if is_ephemeral_error(&error) && attempt < self.config.resume_retry_limit =>
+                    if (is_ephemeral_error(&error) || is_retryable_server_error(&error))
+                        && attempt < self.config.resume_retry_limit =>
                 {
                     attempt += 1;
                     self.states
@@ -489,6 +490,13 @@ fn is_ephemeral_error(error: &Value) -> bool {
     text.contains("ephemeral") || text.contains("rollout") || text.contains("not found")
 }
 
+fn is_retryable_server_error(error: &Value) -> bool {
+    let code = error.get("code").and_then(Value::as_i64);
+    let text = error.to_string().to_ascii_lowercase();
+    code == Some(-32001)
+        && (text.contains("overload") || text.contains("retry") || text.contains("transient"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -709,6 +717,28 @@ mod tests {
             .filter(|request| request["method"] == "thread/resume")
             .count();
         assert_eq!(resumes, 2, "one failed attempt and one bounded retry");
+        client.shutdown().await;
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn overloaded_resume_is_retried_without_losing_the_subscription() {
+        let (_dir, server, client, ingestor) = setup(4, false).await;
+        server.set_request_failures("thread/resume", 2).await;
+
+        assert_eq!(
+            ingestor
+                .discover("overloaded", DiscoverySource::Reconciliation)
+                .await,
+            DiscoveryOutcome::Subscribed
+        );
+        let resumes = server
+            .received()
+            .await
+            .into_iter()
+            .filter(|request| request["method"] == "thread/resume")
+            .count();
+        assert_eq!(resumes, 3);
         client.shutdown().await;
         server.shutdown().await;
     }
