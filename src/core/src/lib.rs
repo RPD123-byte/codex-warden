@@ -29,7 +29,7 @@ pub use skills::{
     SkillLoadError, SkillManagementError, SkillMetadata, SkillsListEntry, SkillsListResponse,
 };
 pub use streaming::LifecycleItem;
-pub use threads::{ListedThread, ThreadListError};
+pub use threads::{ListedThread, ReadThread, ReadTurn, ThreadListError, ThreadReadError};
 pub use transport::{ConnectionPhase, RequestError};
 
 /// Complete runtime configuration. Defaults are deliberately bounded and conservative.
@@ -201,6 +201,16 @@ impl Handle {
     /// threads that are intentionally absent from the reducer snapshot.
     pub async fn list_threads(&self) -> Result<Vec<ListedThread>, ThreadListError> {
         self.threads.list_all().await
+    }
+
+    /// Reads one authoritative thread including retained turns and their items.
+    ///
+    /// This is the recovery surface for input omitted from lightweight lifecycle notifications.
+    pub async fn read_thread(
+        &self,
+        thread_id: impl AsRef<str>,
+    ) -> Result<ReadThread, ThreadReadError> {
+        self.threads.read(thread_id.as_ref()).await
     }
 
     pub async fn shutdown(&self) {

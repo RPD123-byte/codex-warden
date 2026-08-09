@@ -19,6 +19,30 @@ pub struct ListedThread {
     pub metadata: Map<String, Value>,
 }
 
+/// A thread returned by the app-server's authoritative `thread/read` endpoint.
+///
+/// Turn and item content are retained so observers can recover input that is intentionally
+/// omitted from the lightweight `turn/started` notification.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadThread {
+    pub id: String,
+    #[serde(default)]
+    pub turns: Vec<ReadTurn>,
+    #[serde(flatten)]
+    pub metadata: Map<String, Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadTurn {
+    pub id: String,
+    #[serde(default)]
+    pub items: Vec<Value>,
+    #[serde(flatten)]
+    pub metadata: Map<String, Value>,
+}
+
 #[derive(Debug, Error)]
 pub enum ThreadListError {
     #[error(transparent)]
@@ -29,12 +53,25 @@ pub enum ThreadListError {
     RepeatedCursor(String),
 }
 
+#[derive(Debug, Error)]
+pub enum ThreadReadError {
+    #[error(transparent)]
+    Request(#[from] RequestError),
+    #[error("invalid response from thread/read: {0}")]
+    InvalidResponse(#[from] serde_json::Error),
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ThreadListPage {
     data: Vec<ListedThread>,
     #[serde(default)]
     next_cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ThreadReadResponse {
+    thread: ReadThread,
 }
 
 /// Owns the narrow, read-only app-server thread-listing RPC surface.
@@ -84,6 +121,17 @@ impl<C: RpcClient> ThreadController<C> {
         }
 
         Ok(threads)
+    }
+
+    pub(crate) async fn read(&self, thread_id: &str) -> Result<ReadThread, ThreadReadError> {
+        let value = self
+            .client
+            .request(
+                "thread/read",
+                json!({"threadId": thread_id, "includeTurns": true}),
+            )
+            .await?;
+        Ok(serde_json::from_value::<ThreadReadResponse>(value)?.thread)
     }
 }
 
@@ -184,5 +232,48 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn read_retains_turn_items_omitted_from_turn_started() {
+        #[derive(Clone)]
+        struct ReadClient;
+
+        #[async_trait]
+        impl RpcClient for ReadClient {
+            async fn request(&self, method: &str, params: Value) -> Result<Value, RequestError> {
+                assert_eq!(method, "thread/read");
+                assert_eq!(params, json!({"threadId":"thread","includeTurns":true}));
+                Ok(json!({"thread":{
+                    "id":"thread",
+                    "cwd":"/tmp/project",
+                    "turns":[{"id":"turn","status":"inProgress","items":[
+                        {"id":"user","type":"userMessage","content":[{"type":"text","text":"hello"}]}
+                    ]}]
+                }}))
+            }
+
+            async fn request_action(
+                &self,
+                _method: &str,
+                _params: Value,
+            ) -> Result<Value, RequestError> {
+                unreachable!("thread reading does not use the action RPC path")
+            }
+
+            async fn notify(&self, _method: &str, _params: Value) -> Result<(), RequestError> {
+                Ok(())
+            }
+        }
+
+        let thread = ThreadController::new(ReadClient)
+            .read("thread")
+            .await
+            .unwrap();
+        assert_eq!(thread.id, "thread");
+        assert_eq!(thread.turns[0].id, "turn");
+        assert_eq!(thread.turns[0].items[0]["type"], "userMessage");
+        assert_eq!(thread.metadata["cwd"], "/tmp/project");
+        assert_eq!(thread.turns[0].metadata["status"], "inProgress");
     }
 }
